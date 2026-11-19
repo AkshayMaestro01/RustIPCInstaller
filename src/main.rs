@@ -1,14 +1,61 @@
 use eframe::egui;
 use serde::Deserialize;
 use std::{
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::mpsc::{self, Receiver, Sender},
     thread,
     time::{Duration, Instant},
 };
 
-const IMAGE: &str = "/opt/rustipc-installer/Image/yocto_docker.img";
+const DEFAULT_IMAGE: &str = "/opt/rustipc-installer/Image/yocto_docker.img";
 const HELPER: &str = "/usr/local/sbin/rustipc-flash";
+
+fn checked_image(path: impl AsRef<Path>) -> Option<(PathBuf, u64)> {
+    let path = path.as_ref();
+    if path.file_name()?.to_string_lossy() != "yocto_docker.img" {
+        return None;
+    }
+    let canonical = path.canonicalize().ok()?;
+    let metadata = canonical.metadata().ok()?;
+    (metadata.is_file() && metadata.len() > 0).then_some((canonical, metadata.len()))
+}
+
+fn locate_image() -> Option<(PathBuf, u64)> {
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("RUSTIPC_IMAGE") {
+        candidates.push(PathBuf::from(path));
+    }
+    candidates.push(PathBuf::from(DEFAULT_IMAGE));
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("Image/yocto_docker.img"));
+            if let Some(parent) = dir.parent() {
+                candidates.push(parent.join("Image/yocto_docker.img"));
+            }
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("Image/yocto_docker.img"));
+        candidates.push(cwd.join("yocto_docker.img"));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        for suffix in ["Image/yocto_docker.img", "RustIPCInstaller/Image/yocto_docker.img", "Downloads/yocto_docker.img"] {
+            candidates.push(home.join(suffix));
+        }
+    }
+    for path in candidates {
+        if let Some(image) = checked_image(path) {
+            return Some(image);
+        }
+    }
+    let search = Command::new("find")
+        .args(["/media", "/mnt", "-maxdepth", "8", "-type", "f", "-name", "yocto_docker.img", "-print", "-quit"])
+        .output().ok()?;
+    let found = String::from_utf8_lossy(&search.stdout).trim().to_string();
+    if !found.is_empty() { checked_image(found) } else { None }
+}
 
 #[derive(Clone, Debug)]
 struct Disk {
@@ -51,13 +98,17 @@ struct Installer {
     tx: Sender<Event>,
     last_scan: Instant,
     image_size: u64,
+    image_path: Option<PathBuf>,
+    image_path_input: String,
     startup_error: Option<String>,
 }
 
 impl Installer {
     fn new() -> Self {
         let (tx, rx) = mpsc::channel();
-        let image_size = std::fs::metadata(IMAGE).map(|m| m.len()).unwrap_or(0);
+        let image = locate_image();
+        let image_size = image.as_ref().map(|(_, size)| *size).unwrap_or(0);
+        let image_path_input = image.as_ref().map(|(path, _)| path.display().to_string()).unwrap_or_default();
         let mut s = Self {
             disks: vec![],
             selected: None,
@@ -68,11 +119,10 @@ impl Installer {
             tx,
             last_scan: Instant::now() - Duration::from_secs(10),
             image_size,
+            image_path: image.map(|(path, _)| path),
+            image_path_input,
             startup_error: None,
         };
-        if image_size == 0 {
-            s.startup_error = Some(format!("Installer image not found or empty: {IMAGE}"));
-        }
         s.refresh();
         s
     }
@@ -174,7 +224,7 @@ impl Installer {
             walk(d, &root_names, self.image_size, &mut found);
         }
         self.startup_error = if self.image_size == 0 {
-            Some(format!("Installer image not found or empty: {IMAGE}"))
+            Some("Yocto image not found. Copy yocto_docker.img to the app's Image folder, a mounted USB drive, or enter its path below.".into())
         } else if !usb_root {
             Some("Safety check stopped: the running root filesystem is not identified as USB-backed. Boot this installer from its USB drive before flashing.".into())
         } else {
@@ -192,11 +242,12 @@ impl Installer {
         else {
             return;
         };
+        let Some(image) = self.image_path.as_ref() else { return; };
+        let image = image.display().to_string();
         self.busy = true;
         self.confirmation.clear();
         self.logs.push(format!(
-            "Starting guarded flash of {IMAGE} to {}.",
-            disk.path
+            "Starting guarded flash of {} to {}.", image, disk.path
         ));
         let tx = self.tx.clone();
         thread::spawn(move || {
@@ -205,7 +256,7 @@ impl Installer {
                     .into(),
             ));
             let mut child = match Command::new("sudo")
-                .args(["-n", HELPER, "--target", &disk.path])
+                .args(["-n", HELPER, "--target", &disk.path, "--image", &image])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
@@ -274,6 +325,23 @@ impl Installer {
             };
             let _ = tx.send(Event::Finished(result));
         });
+    }
+
+    fn load_image_path(&mut self) {
+        match checked_image(&self.image_path_input) {
+            Some((path, size)) => {
+                self.image_path_input = path.display().to_string();
+                self.image_path = Some(path);
+                self.image_size = size;
+                self.logs.push("Yocto image loaded successfully.".into());
+                self.refresh();
+            }
+            None => {
+                self.image_path = None;
+                self.image_size = 0;
+                self.startup_error = Some("Could not open a non-empty file named yocto_docker.img at that path.".into());
+            }
+        }
     }
 }
 

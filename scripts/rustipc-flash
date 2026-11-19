@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-IMAGE=/opt/rustipc-installer/Image/yocto_docker.img
+IMAGE=""
 TARGET=""
 while (($#)); do
   case "$1" in
     --target) (($# >= 2)) || { echo "Missing target argument" >&2; exit 2; }; TARGET=$2; shift 2 ;;
+    --image) (($# >= 2)) || { echo "Missing image argument" >&2; exit 2; }; IMAGE=$2; shift 2 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 fail() { echo "ERROR: $*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || fail "This helper must run as root."
-[[ -f $IMAGE && -s $IMAGE ]] || fail "Installer image is missing: $IMAGE"
+[[ -n $IMAGE && -f $IMAGE && -s $IMAGE && $(basename -- "$IMAGE") == yocto_docker.img ]] || fail "Image must be a non-empty file named yocto_docker.img."
+IMAGE=$(realpath -e -- "$IMAGE")
 [[ $TARGET == /dev/* && -b $TARGET ]] || fail "Target is not a block device."
 [[ $(lsblk -dnro TYPE -- "$TARGET") == disk ]] || fail "Target must be a whole disk, not a partition."
 
