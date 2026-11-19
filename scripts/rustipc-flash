@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+IMAGE=/opt/rustipc-installer/Image/yocto_docker.img
+TARGET=""
+while (($#)); do
+  case "$1" in
+    --target) (($# >= 2)) || { echo "Missing target argument" >&2; exit 2; }; TARGET=$2; shift 2 ;;
+    *) echo "Unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+fail() { echo "ERROR: $*" >&2; exit 1; }
+[[ $EUID -eq 0 ]] || fail "This helper must run as root."
+[[ -f $IMAGE && -s $IMAGE ]] || fail "Installer image is missing: $IMAGE"
+[[ $TARGET == /dev/* && -b $TARGET ]] || fail "Target is not a block device."
+[[ $(lsblk -dnro TYPE -- "$TARGET") == disk ]] || fail "Target must be a whole disk, not a partition."
+
+ROOT_SOURCE=$(findmnt -n -o SOURCE / || true)
+[[ -n $ROOT_SOURCE ]] || fail "Cannot identify the running root filesystem."
+ROOT_CHAIN=$(lsblk -s -nrpo PATH,TRAN -- "$ROOT_SOURCE" 2>/dev/null || true)
+grep -Eq '[[:space:]]usb$' <<<"$ROOT_CHAIN" || fail "Running root is not on a USB device; refusing to flash."
+ROOT_PATHS=$(awk '{print $1}' <<<"$ROOT_CHAIN")
+grep -Fxq "$TARGET" <<<"$ROOT_PATHS" && fail "Target contains the running root filesystem."
+
+TRAN=$(lsblk -dnro TRAN -- "$TARGET" | tr '[:upper:]' '[:lower:]')
+case "$TRAN" in sata|ata|nvme) ;; *) fail "Target transport '$TRAN' is not an allowed internal SATA/NVMe disk." ;; esac
+[[ $(lsblk -dnro RM -- "$TARGET") == 0 ]] || fail "Target is marked removable."
+[[ $(lsblk -dnro RO -- "$TARGET") == 0 ]] || fail "Target is read-only."
+MOUNTS=$(lsblk -nrpo MOUNTPOINTS -- "$TARGET")
+[[ -z ${MOUNTS//[[:space:]]/} ]] || fail "Target has mounted filesystems; unmount them before flashing."
+while IFS= read -r swap; do
+  [[ -n $swap ]] || continue
+  SWAP_REAL=$(readlink -f -- "$swap" 2>/dev/null || printf '%s' "$swap")
+  TARGET_REAL=$(readlink -f -- "$TARGET")
+  [[ $SWAP_REAL == "$TARGET_REAL" || $SWAP_REAL == "$TARGET_REAL"* ]] && fail "Target has active swap: $swap"
+done < <(swapon --noheadings --raw --show=NAME)
+
+IMAGE_BYTES=$(stat -c %s -- "$IMAGE")
+TARGET_BYTES=$(blockdev --getsize64 "$TARGET")
+(( TARGET_BYTES >= IMAGE_BYTES )) || fail "Image (${IMAGE_BYTES} bytes) does not fit on target (${TARGET_BYTES} bytes)."
+EXPECTED=$(sha256sum -- "$IMAGE" | awk '{print $1}')
+echo "Safety checks passed. Image size: $IMAGE_BYTES bytes; target: $TARGET ($TARGET_BYTES bytes)."
+echo "Writing image with dd; do not remove power or the USB installer."
+dd if="$IMAGE" of="$TARGET" bs=4M iflag=fullblock conv=fsync status=progress
+sync
+echo "Write complete. Verifying the first $IMAGE_BYTES bytes by SHA-256…"
+ACTUAL=$(dd if="$TARGET" bs=4M iflag=count_bytes count="$IMAGE_BYTES" status=none | sha256sum | awk '{print $1}')
+[[ $EXPECTED == "$ACTUAL" ]] || fail "Verification failed. Expected $EXPECTED; read back $ACTUAL."
+echo "SUCCESS: SHA-256 verified: $ACTUAL"
+echo "Power off, remove the USB installer, then boot the new system."
