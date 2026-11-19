@@ -1,6 +1,6 @@
 # RustIPC Installer
 
-A full-screen Ubuntu kiosk for writing the bundled `Image/yocto_docker.img` to an internal SATA/ATA/NVMe drive. It is intended to boot from an Ubuntu Server installation on a USB pendrive. The desktop app runs as an unprivileged account; a small root-owned helper repeats all safety checks and performs the write.
+A full-screen Ubuntu kiosk for writing the separately supplied `Image/yocto_docker.img` to an internal SATA/ATA/NVMe drive. It is intended to boot from an Ubuntu Server installation on a USB pendrive. The desktop app runs as an unprivileged account; a small root-owned helper repeats all safety checks and performs the write.
 
 ## What the installer does
 
@@ -10,6 +10,8 @@ A full-screen Ubuntu kiosk for writing the bundled `Image/yocto_docker.img` to a
 4. Requires the operator to select a drive and type `ERASE`.
 5. Rechecks the boot source and target as root, checks mounted filesystems, swap, capacity, and disk type, then writes with `dd`.
 6. Shows `dd` progress in the kiosk and reads back the written image to compare its SHA-256 hash.
+
+The app looks in `/opt/rustipc-installer/Image`, beside its executable, in the project folder, and on mounted media. If the image is stored elsewhere, enter its full path in the kiosk and load it. The file must be named `yocto_docker.img`.
 
 This overwrites the selected disk's partition table and data. When the helper reports success, power off and remove the installer pendrive before starting the newly flashed machine.
 
@@ -79,6 +81,10 @@ sudo reboot
 If transferring the project over the network, connect to a trusted network, clone the repository, verify `Image/yocto_docker.img` is present, and run the same commands. The script installs only the minimal Xorg/Openbox kiosk dependencies, copies the image and executable under `/opt/rustipc-installer`, configures a constrained passwordless sudo rule for the flash helper, and enables the full-screen kiosk on tty1. It does not compile on the kiosk.
 
 After reboot, the kiosk starts automatically. The installer needs local disk utilities already provided by Ubuntu (`lsblk`, `findmnt`, `dd`, `blockdev`, `sha256sum`, `swapon`). It does not need SSH, network connectivity, or Docker to write the image.
+
+### Update an already-installed kiosk
+
+The running kiosk is a compiled executable; editing or pulling the Rust source does not change the installed screen. Build the updated source on Ubuntu Desktop with `cargo build --release`, transfer the updated project (including the built executable and image) to the kiosk, then rerun `sudo bash scripts/install-kiosk.sh installer "$PWD"` from that project directory and reboot. The setup script replaces both the kiosk executable and its flash helper.
 
 ### 3. Flash the target machine
 
